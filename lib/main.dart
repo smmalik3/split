@@ -911,33 +911,17 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
           ],
         ),
         actions: [
-          IconButton(
-            icon: Icon(context.isDark
-                ? Icons.light_mode_rounded
-                : Icons.dark_mode_rounded),
-            tooltip: context.isDark
-                ? 'Switch to light mode'
-                : 'Switch to dark mode',
-            onPressed: toggleTheme,
-          ),
-          IconButton(
-            icon: const Icon(Icons.link_rounded),
-            tooltip: 'Copy invite link',
-            onPressed: _copyInvite,
-          ),
-          IconButton(
-            icon: const Icon(Icons.download_rounded),
-            tooltip: 'Export / monthly summary',
-            onPressed: _showExportMenu,
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh_rounded),
-            tooltip: 'Refresh',
-            onPressed: _refresh,
-          ),
           PopupMenuButton<String>(
             onSelected: (v) async {
-              if (v == 'leave') {
+              if (v == 'theme') {
+                await toggleTheme();
+              } else if (v == 'invite') {
+                await _copyInvite();
+              } else if (v == 'export') {
+                _showExportMenu();
+              } else if (v == 'refresh') {
+                await _refresh();
+              } else if (v == 'leave') {
                 final ok = await showDialog<bool>(
                   context: context,
                   builder: (ctx) => AlertDialog(
@@ -952,8 +936,57 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
                 if (ok == true) await widget.onLeave();
               }
             },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'leave', child: Text('Leave group')),
+            itemBuilder: (_) => [
+              PopupMenuItem(
+                value: 'theme',
+                child: Row(
+                  children: [
+                    Icon(context.isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded, size: 20),
+                    const SizedBox(width: 12),
+                    Text(context.isDark ? 'Switch to light mode' : 'Switch to dark mode'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'invite',
+                child: Row(
+                  children: [
+                    Icon(Icons.link_rounded, size: 20),
+                    SizedBox(width: 12),
+                    Text('Copy invite link'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'export',
+                child: Row(
+                  children: [
+                    Icon(Icons.download_rounded, size: 20),
+                    SizedBox(width: 12),
+                    Text('Export / monthly summary'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'refresh',
+                child: Row(
+                  children: [
+                    Icon(Icons.refresh_rounded, size: 20),
+                    SizedBox(width: 12),
+                    Text('Refresh'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'leave',
+                child: Row(
+                  children: [
+                    Icon(Icons.exit_to_app_rounded, size: 20),
+                    SizedBox(width: 12),
+                    Text('Leave group'),
+                  ],
+                ),
+              ),
             ],
           ),
         ],
