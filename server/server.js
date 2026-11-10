@@ -1,6 +1,9 @@
 // Split — backend: Express + libSQL (Turso hosted, or local file) + tesseract.js OCR.
 // Serves the Flutter web build, the REST API, and receipt images.
-// No auth. No secrets. DB config comes from env; without it, a local file DB
+// Guest use needs no account. Optional Google login (server-side OAuth
+// redirect flow) is configured with GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
+// env vars; without them the auth endpoints 503 and guests are unaffected.
+// DB config comes from env; without it, a local file DB
 // in data/ is used so local dev keeps working unchanged.
 // Receipt photos are stored as BLOBs in the database (Render's free tier has
 // an ephemeral filesystem, so on-disk uploads would vanish on restart).
@@ -83,6 +86,20 @@ const SCHEMA = `
     amount REAL NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    google_sub TEXT UNIQUE NOT NULL,
+    email TEXT,
+    name TEXT,
+    picture_url TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL
+  );
 `;
 
 // Columns added after the initial schema landed (expenses split/tax/tip,
@@ -108,6 +125,7 @@ async function runMigrations() {
   await ensureColumn('expenses', 'tip', 'REAL NOT NULL DEFAULT 0');
   await ensureColumn('members', 'venmo_handle', 'TEXT');
   await ensureColumn('members', 'cashapp_handle', 'TEXT');
+  await ensureColumn('members', 'user_id', 'INTEGER');
 }
 
 // ---- tiny query helpers (libSQL is async; rows come back as objects) ----
@@ -133,6 +151,7 @@ function toBuffer(v) {
 }
 
 const app = express();
+app.set('trust proxy', true); // behind Render's proxy, req.protocol honors X-Forwarded-Proto
 app.use(express.json({ limit: '2mb' }));
 
 // ---- helpers ----
@@ -306,7 +325,185 @@ function parseReceipt(text) {
 // ---- API ----
 app.get('/api/health', (req, res) => res.json({ ok: true, app: 'Split' }));
 
-app.post('/api/groups', async (req, res) => {
+// ---- Google auth (optional) ----
+// Login is optional: guests keep working exactly as before. The flow is
+// the server-side OAuth redirect flow — no client secret ever leaves the
+// server. Config comes from env; without it the auth endpoints 503.
+// The redirect URI is derived from the incoming request so the same code
+// works on Render and localhost (both URIs must be registered in Google
+// Cloud Console).
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const OAUTH_STATE_COOKIE = 'oauth_state';
+
+function googleConfigured() {
+  return Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET);
+}
+function appOrigin(req) {
+  return `${req.protocol}://${req.get('host')}`;
+}
+function googleRedirectUri(req) {
+  return `${appOrigin(req)}/api/auth/google/callback`;
+}
+function parseCookies(req) {
+  const out = {};
+  const header = req.get('cookie');
+  if (!header) return out;
+  for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+// 'YYYY-MM-DD HH:MM:SS' — the same format as SQLite's datetime('now'),
+// so string comparison against expires_at works.
+function sqliteDate(d) {
+  return d.toISOString().slice(0, 19).replace('T', ' ');
+}
+async function createSession(userId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const expires = sqliteDate(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000));
+  await qRun('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', [token, userId, expires]);
+  return token;
+}
+function userJson(u) {
+  return { id: u.id, email: u.email ?? null, name: u.name ?? null, picture_url: u.picture_url ?? null };
+}
+
+// Optional auth: a valid Bearer session attaches req.user; a missing or
+// bad token is ignored (guests keep working).
+async function optionalAuth(req, res, next) {
+  try {
+    const header = req.get('authorization') || '';
+    const m = header.match(/^Bearer\s+(.+)$/i);
+    if (!m) return next();
+    const row = await qGet(
+      `SELECT u.id, u.google_sub, u.email, u.name, u.picture_url
+       FROM sessions s JOIN users u ON u.id = s.user_id
+       WHERE s.token = ? AND s.expires_at > datetime('now')`,
+      [m[1]]);
+    if (row) req.user = { id: row.id, google_sub: row.google_sub, email: row.email, name: row.name, picture_url: row.picture_url };
+  } catch (e) {
+    console.error('optionalAuth error:', e.message);
+  }
+  next();
+}
+function requireAuth(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Login required' });
+  next();
+}
+
+// Step 1: redirect the browser to Google's consent screen.
+app.get('/api/auth/google/start', (req, res) => {
+  if (!googleConfigured()) return res.status(503).json({ error: 'Google login is not configured' });
+  const state = crypto.randomBytes(16).toString('hex');
+  const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  url.searchParams.set('client_id', GOOGLE_CLIENT_ID);
+  url.searchParams.set('redirect_uri', googleRedirectUri(req));
+  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('scope', 'openid email profile');
+  url.searchParams.set('prompt', 'select_account');
+  url.searchParams.set('state', state);
+  const cookie = [
+    `${OAUTH_STATE_COOKIE}=${state}`,
+    'HttpOnly',
+    'Max-Age=600',
+    'SameSite=Lax',
+    'Path=/api/auth',
+    ...(req.protocol === 'https' ? ['Secure'] : []),
+  ].join('; ');
+  res.set('Set-Cookie', cookie);
+  res.redirect(302, url.toString());
+});
+
+// Step 2: Google redirects back here with ?code=&state=.
+app.get('/api/auth/google/callback', async (req, res) => {
+  const origin = appOrigin(req);
+  const fail = () => res.redirect(302, `${origin}/?auth_error=1`);
+  const cookies = parseCookies(req);
+  const expectedState = cookies[OAUTH_STATE_COOKIE];
+  // Clear the state cookie either way.
+  res.set('Set-Cookie', `${OAUTH_STATE_COOKIE}=; HttpOnly; Max-Age=0; SameSite=Lax; Path=/api/auth`);
+  const { code, state } = req.query || {};
+  if (!expectedState || !state || state !== expectedState) {
+    return res.status(400).json({ error: 'Invalid or missing OAuth state' });
+  }
+  if (!code) return fail();
+  if (!googleConfigured()) return fail();
+  try {
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code: String(code),
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: googleRedirectUri(req),
+        grant_type: 'authorization_code',
+      }),
+    });
+    if (!tokenRes.ok) return fail();
+    const tokenJson = await tokenRes.json();
+    if (!tokenJson.id_token) return fail();
+    const infoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(tokenJson.id_token)}`);
+    if (!infoRes.ok) return fail();
+    const info = await infoRes.json();
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (info.aud !== GOOGLE_CLIENT_ID) return fail();
+    if (info.iss !== 'https://accounts.google.com' && info.iss !== 'accounts.google.com') return fail();
+    if (!info.exp || Number(info.exp) <= nowSec) return fail();
+    if (!info.sub) return fail();
+    const existing = await qGet('SELECT id FROM users WHERE google_sub = ?', [info.sub]);
+    let userId;
+    if (existing) {
+      await qRun('UPDATE users SET email = ?, name = ?, picture_url = ? WHERE id = ?',
+        [info.email || null, info.name || null, info.picture || null, existing.id]);
+      userId = existing.id;
+    } else {
+      const ins = await qRun('INSERT INTO users (google_sub, email, name, picture_url) VALUES (?, ?, ?, ?)',
+        [info.sub, info.email || null, info.name || null, info.picture || null]);
+      userId = Number(ins.lastInsertRowid);
+    }
+    const token = await createSession(userId);
+    return res.redirect(302, `${origin}/?token=${token}`);
+  } catch (e) {
+    console.error('Google callback error:', e.message);
+    return fail();
+  }
+});
+
+app.get('/api/me', optionalAuth, requireAuth, (req, res) => {
+  res.json({ user: userJson(req.user) });
+});
+
+app.get('/api/me/groups', optionalAuth, requireAuth, async (req, res) => {
+  const rows = await qAll(
+    `SELECT g.code, g.name, m.nickname, m.id AS memberId
+     FROM members m JOIN groups g ON g.id = m.group_id
+     WHERE m.user_id = ? ORDER BY g.created_at DESC, g.code`,
+    [req.user.id]);
+  res.json({ groups: rows.map(r => ({ code: r.code, name: r.name, nickname: r.nickname, memberId: r.memberId })) });
+});
+
+app.post('/api/me/link', optionalAuth, requireAuth, async (req, res) => {
+  const { code, memberId } = req.body || {};
+  if (!code || memberId == null) return res.status(400).json({ error: 'code and memberId required' });
+  const group = await getGroup(code);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  const member = await qGet('SELECT id, nickname, venmo_handle, cashapp_handle, created_at, user_id FROM members WHERE id = ? AND group_id = ?', [memberId, group.id]);
+  if (!member) return res.status(404).json({ error: 'Member not found' });
+  if (member.user_id != null && Number(member.user_id) !== Number(req.user.id)) {
+    return res.status(409).json({ error: 'That member is already linked to another account' });
+  }
+  if (member.user_id == null) {
+    await qRun('UPDATE members SET user_id = ? WHERE id = ?', [req.user.id, member.id]);
+  }
+  const updated = await qGet('SELECT id, nickname, venmo_handle, cashapp_handle, created_at FROM members WHERE id = ?', [member.id]);
+  res.json({ ok: true, member: memberJson(updated) });
+});
+
+app.post('/api/groups', optionalAuth, async (req, res) => {
   const { name, nickname } = req.body || {};
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'Group name required' });
   if (!nickname || !String(nickname).trim()) return res.status(400).json({ error: 'Nickname required' });
@@ -314,7 +511,8 @@ app.post('/api/groups', async (req, res) => {
   for (let tries = 0; tries < 5; tries++) {
     try {
       const info = await qRun('INSERT INTO groups (code, name) VALUES (?, ?)', [code, String(name).trim()]);
-      const member = await qRun('INSERT INTO members (group_id, nickname) VALUES (?, ?)', [Number(info.lastInsertRowid), String(nickname).trim()]);
+      const member = await qRun('INSERT INTO members (group_id, nickname, user_id) VALUES (?, ?, ?)',
+        [Number(info.lastInsertRowid), String(nickname).trim(), req.user ? req.user.id : null]);
       const group = await getGroup(code);
       return res.status(201).json({ ...(await groupPayload(group)), your_member_id: Number(member.lastInsertRowid) });
     } catch (e) { code = makeCode(); }
@@ -322,15 +520,21 @@ app.post('/api/groups', async (req, res) => {
   return res.status(500).json({ error: 'Could not create group, try again' });
 });
 
-app.post('/api/groups/:code/join', async (req, res) => {
+app.post('/api/groups/:code/join', optionalAuth, async (req, res) => {
   const group = await getGroup(req.params.code);
   if (!group) return res.status(404).json({ error: 'Group not found' });
+  // Logged-in users rejoin as their existing member row, never a duplicate.
+  if (req.user) {
+    const mine = await qGet('SELECT id FROM members WHERE group_id = ? AND user_id = ?', [group.id, req.user.id]);
+    if (mine) return res.json({ ...(await groupPayload(group)), your_member_id: mine.id, rejoined: true });
+  }
   const { nickname } = req.body || {};
   if (!nickname || !String(nickname).trim()) return res.status(400).json({ error: 'Nickname required' });
   const nick = String(nickname).trim();
   const existing = await qGet('SELECT id FROM members WHERE group_id = ? AND lower(nickname) = lower(?)', [group.id, nick]);
   if (existing) return res.json({ ...(await groupPayload(group)), your_member_id: existing.id, rejoined: true });
-  const info = await qRun('INSERT INTO members (group_id, nickname) VALUES (?, ?)', [group.id, nick]);
+  const info = await qRun('INSERT INTO members (group_id, nickname, user_id) VALUES (?, ?, ?)',
+    [group.id, nick, req.user ? req.user.id : null]);
   return res.status(201).json({ ...(await groupPayload(group)), your_member_id: Number(info.lastInsertRowid) });
 });
 

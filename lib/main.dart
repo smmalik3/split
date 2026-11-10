@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'api.dart';
+import 'auth.dart';
 import 'download_stub.dart' if (dart.library.html) 'download_web.dart';
 
 void main() async {
@@ -17,6 +18,7 @@ void main() async {
   final prefs = await SharedPreferences.getInstance();
   final dark = prefs.getBool('split_dark_mode') ?? true;
   _themeMode.value = dark ? ThemeMode.dark : ThemeMode.light;
+  await AuthService.init();
   runApp(const SplitApp());
 }
 
@@ -196,6 +198,7 @@ class _RootScreenState extends State<RootScreen> {
   String? _joinCodePrefill;
   bool _loading = true;
   bool _showHome = false;
+  bool _authError = false;
 
   @override
   void initState() {
@@ -203,7 +206,16 @@ class _RootScreenState extends State<RootScreen> {
     _restore();
   }
 
+  void _snack(String msg) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+
   Future<void> _restore() async {
+    // OAuth return first: a fresh token (or a failed login) reloads the page
+    // with the param stripped, so the outcome also survives via the
+    // persisted auth-error flag for the fresh load to pick up.
+    final authResult = await AuthService.handleLaunch();
+    final authError =
+        authResult == 'error' || await AuthService.takeAuthError();
     final prefs = await SharedPreferences.getInstance();
     final code = prefs.getString('split_code');
     final memberId = prefs.getInt('split_member_id');
@@ -214,8 +226,19 @@ class _RootScreenState extends State<RootScreen> {
         _session = Session(code, memberId, nickname);
       }
       _joinCodePrefill = urlCode?.toUpperCase();
+      _authError = authError;
       _loading = false;
     });
+    // Link the guest session to the account now that we're signed in
+    // (idempotent server-side, so this also heals a missed link).
+    if (AuthService.isLoggedIn && _session != null) {
+      await AuthService.linkCurrentSession();
+    }
+    // Failed login: the landing screen shows it when there is no session;
+    // show it here when we're heading straight into a group.
+    if (authError && _session != null && mounted) {
+      _snack('Google login failed — try again.');
+    }
   }
 
   Future<void> _saveSession(Session s) async {
@@ -226,6 +249,7 @@ class _RootScreenState extends State<RootScreen> {
     setState(() {
       _session = s;
       _showHome = false;
+      _authError = false;
     });
   }
 
@@ -237,6 +261,7 @@ class _RootScreenState extends State<RootScreen> {
     setState(() {
       _session = null;
       _showHome = false;
+      _authError = false;
     });
   }
 
@@ -254,7 +279,14 @@ class _RootScreenState extends State<RootScreen> {
     if (_session != null && !_showHome) {
       return GroupScreen(session: _session!, onLeave: _leave, onHome: _goHome);
     }
-    return LandingScreen(prefillCode: _joinCodePrefill, onSession: _saveSession);
+    return LandingScreen(
+      prefillCode: _joinCodePrefill,
+      onSession: _saveSession,
+      authError: _authError,
+      onAuthErrorShown: () {
+        if (mounted) setState(() => _authError = false);
+      },
+    );
   }
 }
 
@@ -262,7 +294,15 @@ class _RootScreenState extends State<RootScreen> {
 class LandingScreen extends StatefulWidget {
   final String? prefillCode;
   final Future<void> Function(Session) onSession;
-  const LandingScreen({super.key, this.prefillCode, required this.onSession});
+  final bool authError;
+  final VoidCallback? onAuthErrorShown;
+  const LandingScreen({
+    super.key,
+    this.prefillCode,
+    required this.onSession,
+    this.authError = false,
+    this.onAuthErrorShown,
+  });
 
   @override
   State<LandingScreen> createState() => _LandingScreenState();
@@ -286,20 +326,52 @@ class _LandingScreenState extends State<LandingScreen> with SingleTickerProvider
       _tabs.index = 1;
     }
     _loadMyGroups();
+    if (widget.authError) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _snack('Google login failed — try again.');
+        widget.onAuthErrorShown?.call();
+      });
+    }
   }
 
   Future<void> _loadMyGroups() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString('split_my_groups');
-    if (raw == null || raw.isEmpty) return;
-    try {
-      final list = (jsonDecode(raw) as List)
-          .map((e) => Map<String, dynamic>.from(e as Map))
-          .toList();
-      if (mounted) setState(() => _myGroups = list);
-    } catch (_) {
-      // Corrupt saved list: ignore it rather than crashing the landing screen.
+    var list = <Map<String, dynamic>>[];
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        list = (jsonDecode(raw) as List)
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+      } catch (_) {
+        // Corrupt saved list: ignore it rather than crashing the landing screen.
+      }
     }
+    if (AuthService.isLoggedIn) {
+      // Merge the account's server-side groups: server entries win for
+      // nickname/memberId. Failures (offline, expired token) are ignored
+      // and the local list stands.
+      try {
+        final res = await SplitApi.getMyGroups();
+        final server = (res['groups'] as List?) ?? [];
+        for (final g in server) {
+          final m = Map<String, dynamic>.from(g as Map);
+          final code = '${m['code'] ?? ''}';
+          if (code.isEmpty || m['memberId'] == null) continue;
+          final entry = {
+            'code': code,
+            'name': '${m['name'] ?? code}',
+            'nickname': '${m['nickname'] ?? ''}',
+            'memberId': (m['memberId'] as num).toInt(),
+          };
+          list = [entry, ...list.where((e) => e['code'] != code)];
+        }
+        // Persist the merged list so it survives sign-out.
+        await prefs.setString('split_my_groups', jsonEncode(list));
+      } catch (_) {}
+    }
+    if (mounted) setState(() => _myGroups = list);
   }
 
   Future<void> _saveMyGroup(String code, String name, String nickname, int memberId) async {
@@ -337,6 +409,19 @@ class _LandingScreenState extends State<LandingScreen> with SingleTickerProvider
 
   void _snack(String msg) =>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+
+  Future<void> _login() async {
+    try {
+      await AuthService.login();
+    } catch (_) {
+      _snack('Could not open Google login — try again.');
+    }
+  }
+
+  Future<void> _logout() async {
+    await AuthService.logout();
+    _snack('Signed out. Your groups are still saved on this device.');
+  }
 
   Future<void> _create() async {
     final name = _createGroupName.text.trim();
@@ -434,6 +519,76 @@ class _LandingScreenState extends State<LandingScreen> with SingleTickerProvider
                   ),
                 ),
                 const SizedBox(height: 28),
+                ValueListenableBuilder<AuthUser?>(
+                  valueListenable: AuthService.currentUser,
+                  builder: (context, user, _) {
+                    if (user == null) {
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          FilledButton.icon(
+                            onPressed: _login,
+                            style: FilledButton.styleFrom(
+                              // White with dark text in both themes — the
+                              // standard Google button look.
+                              backgroundColor: Colors.white,
+                              foregroundColor: const Color(0xFF1F1F1F),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 20, vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12)),
+                            ),
+                            icon: const Text('G',
+                                style: TextStyle(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w900,
+                                    color: Color(0xFF4285F4))),
+                            label: const Text('Continue with Google',
+                                style: TextStyle(fontWeight: FontWeight.w700)),
+                          ),
+                          const SizedBox(height: 12),
+                          Center(
+                            child: Text('or continue as a guest',
+                                style: TextStyle(
+                                    color: context.faint, fontSize: 13)),
+                          ),
+                          const SizedBox(height: 16),
+                        ],
+                      );
+                    }
+                    return Column(
+                      children: [
+                        Card(
+                          child: ListTile(
+                            leading: CircleAvatar(
+                              backgroundImage: user.pictureUrl != null
+                                  ? NetworkImage(user.pictureUrl!)
+                                  : null,
+                              backgroundColor: _avatarColor(user.name),
+                              child: user.pictureUrl != null
+                                  ? null
+                                  : Text(user.initials,
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.bold)),
+                            ),
+                            title: Text(user.name,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w600)),
+                            subtitle: Text(user.email,
+                                style: TextStyle(
+                                    color: context.muted, fontSize: 13)),
+                            trailing: TextButton(
+                              onPressed: _logout,
+                              child: const Text('Sign out'),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                    );
+                  },
+                ),
                 if (_myGroups.isNotEmpty) ...[
                   Align(
                     alignment: Alignment.centerLeft,
@@ -506,7 +661,7 @@ class _LandingScreenState extends State<LandingScreen> with SingleTickerProvider
                 const SizedBox(height: 16),
                 Center(
                   child: Text(
-                    'No accounts. No passwords.\nJust share the group link and pick a nickname.',
+                    'No account needed.\nJust share the group link and pick a nickname.',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: context.faint, fontSize: 13, height: 1.5),
                   ),
