@@ -57,6 +57,10 @@ class SplitApi {
     String note = '',
     String? receipt,
     String? date,
+    String splitMode = 'equal',
+    Map<String, dynamic>? splitData,
+    double tax = 0,
+    double tip = 0,
   }) async {
     final r = await _client.post(
       Uri.parse('/api/groups/${code.toUpperCase()}/expenses'),
@@ -68,7 +72,69 @@ class SplitApi {
         'note': note,
         'receipt': receipt,
         'date': date,
+        'split_mode': splitMode,
+        'split_data': splitData,
+        'tax': tax,
+        'tip': tip,
       }),
+    );
+    return _decode(r);
+  }
+
+  static Future<Map<String, dynamic>> createSettlement(
+    String code, {
+    required int fromMemberId,
+    required int toMemberId,
+    required double amount,
+  }) async {
+    final r = await _client.post(
+      Uri.parse('/api/groups/${code.toUpperCase()}/settlements'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'from_member_id': fromMemberId,
+        'to_member_id': toMemberId,
+        'amount': amount,
+      }),
+    );
+    return _decode(r);
+  }
+
+  static Future<Map<String, dynamic>> deleteSettlement(String code, int id) async {
+    final r = await _client.delete(Uri.parse('/api/groups/${code.toUpperCase()}/settlements/$id'));
+    return _decode(r);
+  }
+
+  static Future<Map<String, dynamic>> createNudge(
+    String code, {
+    required int fromMemberId,
+    required int toMemberId,
+    required double amount,
+  }) async {
+    final r = await _client.post(
+      Uri.parse('/api/groups/${code.toUpperCase()}/nudges'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'from_member_id': fromMemberId,
+        'to_member_id': toMemberId,
+        'amount': amount,
+      }),
+    );
+    return _decode(r);
+  }
+
+  static Future<Map<String, dynamic>> updateMemberHandles(
+    String code,
+    int memberId, {
+    String? venmoHandle,
+    String? cashappHandle,
+  }) async {
+    final body = <String, dynamic>{};
+    if (venmoHandle != null) body['venmo_handle'] = venmoHandle;
+    if (cashappHandle != null) body['cashapp_handle'] = cashappHandle;
+    final r = await _client.patch(
+      Uri.parse('/api/groups/${code.toUpperCase()}/members/$memberId'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(body),
     );
     return _decode(r);
   }

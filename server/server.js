@@ -67,7 +67,48 @@ const SCHEMA = `
     mime TEXT NOT NULL DEFAULT 'image/jpeg',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS settlements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_code TEXT NOT NULL,
+    from_member_id INTEGER NOT NULL,
+    to_member_id INTEGER NOT NULL,
+    amount REAL NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS nudges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_code TEXT NOT NULL,
+    from_member_id INTEGER NOT NULL,
+    to_member_id INTEGER NOT NULL,
+    amount REAL NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `;
+
+// Columns added after the initial schema landed (expenses split/tax/tip,
+// member payment handles). ALTER TABLE is guarded: re-running the server
+// must never error if a column already exists.
+async function ensureColumn(table, column, definition) {
+  try {
+    const cols = await qAll(`PRAGMA table_info(${table})`);
+    if (cols.some(c => c.name === column)) return;
+  } catch (e) {
+    // PRAGMA unsupported on this driver — fall through to the ALTER attempt.
+  }
+  try {
+    await qRun(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  } catch (e) {
+    if (!/duplicate column/i.test(e.message || '')) throw e;
+  }
+}
+async function runMigrations() {
+  await ensureColumn('expenses', 'split_mode', "TEXT NOT NULL DEFAULT 'equal'");
+  await ensureColumn('expenses', 'split_data', 'TEXT');
+  await ensureColumn('expenses', 'tax', 'REAL NOT NULL DEFAULT 0');
+  await ensureColumn('expenses', 'tip', 'REAL NOT NULL DEFAULT 0');
+  await ensureColumn('members', 'venmo_handle', 'TEXT');
+  await ensureColumn('members', 'cashapp_handle', 'TEXT');
+}
 
 // ---- tiny query helpers (libSQL is async; rows come back as objects) ----
 async function qAll(sql, args = []) {
@@ -107,24 +148,56 @@ function dollars(c) { return (c / 100).toFixed(2); }
 async function getGroup(code) {
   return qGet('SELECT * FROM groups WHERE code = ?', [String(code).toUpperCase()]);
 }
+// split_data is stored as a JSON string; the API returns the parsed
+// object (or null), never the raw string.
+function parseSplitData(v) {
+  if (v == null) return null;
+  if (typeof v === 'object') return v;
+  try { return JSON.parse(v); } catch { return null; }
+}
+function memberJson(m) {
+  return {
+    id: m.id, nickname: m.nickname,
+    venmo_handle: m.venmo_handle ?? null,
+    cashapp_handle: m.cashapp_handle ?? null,
+    created_at: m.created_at,
+  };
+}
+function transferJson(row) {
+  return {
+    id: row.id,
+    from_member_id: row.from_member_id,
+    to_member_id: row.to_member_id,
+    amount: Number(row.amount),
+    created_at: row.created_at,
+  };
+}
 async function groupPayload(group) {
-  const members = await qAll('SELECT id, nickname, created_at FROM members WHERE group_id = ? ORDER BY id', [group.id]);
+  const members = await qAll('SELECT id, nickname, venmo_handle, cashapp_handle, created_at FROM members WHERE group_id = ? ORDER BY id', [group.id]);
   const expenses = await qAll(`
     SELECT e.*, m.nickname AS payer
     FROM expenses e JOIN members m ON m.id = e.member_id
     WHERE e.group_id = ? ORDER BY e.expense_date DESC, e.id DESC`, [group.id]);
+  const settlements = await qAll('SELECT * FROM settlements WHERE group_code = ? ORDER BY id DESC', [group.code]);
+  const nudges = await qAll('SELECT * FROM nudges WHERE group_code = ? ORDER BY id DESC', [group.code]);
   const totalCents = expenses.reduce((s, e) => s + e.total_cents, 0);
   return {
     code: group.code,
     name: group.name,
     created_at: group.created_at,
-    members,
+    members: members.map(memberJson),
     expenses: expenses.map(e => ({
       id: e.id, merchant: e.merchant, total: dollars(e.total_cents),
       total_cents: e.total_cents, note: e.note, receipt: e.receipt,
       date: e.expense_date, payer: e.payer, payer_id: e.member_id,
+      split_mode: e.split_mode || 'equal',
+      split_data: parseSplitData(e.split_data),
+      tax: e.tax == null ? 0 : Number(e.tax),
+      tip: e.tip == null ? 0 : Number(e.tip),
       created_at: e.created_at,
     })),
+    settlements: settlements.map(transferJson),
+    nudges: nudges.map(transferJson),
     total: dollars(totalCents),
     total_cents: totalCents,
   };
@@ -276,17 +349,97 @@ app.get('/api/groups/:code/balances', async (req, res) => {
 app.post('/api/groups/:code/expenses', async (req, res) => {
   const group = await getGroup(req.params.code);
   if (!group) return res.status(404).json({ error: 'Group not found' });
-  const { member_id, merchant, total, note, receipt, date } = req.body || {};
+  const { member_id, merchant, total, note, receipt, date, split_mode, split_data, tax, tip } = req.body || {};
   const member = await qGet('SELECT id FROM members WHERE id = ? AND group_id = ?', [member_id, group.id]);
   if (!member) return res.status(400).json({ error: 'Unknown member' });
   const totalCents = cents(total);
   if (!isFinite(totalCents) || totalCents <= 0) return res.status(400).json({ error: 'Total must be greater than 0' });
+  const mode = split_mode === undefined ? 'equal' : String(split_mode);
+  if (!['equal', 'shares', 'items'].includes(mode)) return res.status(400).json({ error: "split_mode must be 'equal', 'shares', or 'items'" });
+  if (split_data !== undefined && split_data !== null && (typeof split_data !== 'object' || Array.isArray(split_data))) {
+    return res.status(400).json({ error: 'split_data must be an object or null' });
+  }
+  const taxNum = tax === undefined ? 0 : Number(tax);
+  const tipNum = tip === undefined ? 0 : Number(tip);
+  if (!isFinite(taxNum) || taxNum < 0) return res.status(400).json({ error: 'tax must be a number >= 0' });
+  if (!isFinite(tipNum) || tipNum < 0) return res.status(400).json({ error: 'tip must be a number >= 0' });
   const info = await qRun(
-    'INSERT INTO expenses (group_id, member_id, merchant, total_cents, note, receipt, expense_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO expenses (group_id, member_id, merchant, total_cents, note, receipt, expense_date, split_mode, split_data, tax, tip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     [group.id, member.id, String(merchant || 'Expense').trim().slice(0, 80), totalCents,
       String(note || '').trim().slice(0, 200), receipt ? String(receipt) : null,
-      date ? String(date).slice(0, 10) : new Date().toISOString().slice(0, 10)]);
+      date ? String(date).slice(0, 10) : new Date().toISOString().slice(0, 10),
+      mode, split_data ? JSON.stringify(split_data) : null, taxNum, tipNum]);
   res.status(201).json({ id: Number(info.lastInsertRowid), ...(await groupPayload(group)) });
+});
+
+// Validate a settlement / nudge transfer. Returns an error string, or null.
+async function validateTransfer(group, fromId, toId, amount) {
+  const amt = Number(amount);
+  if (!isFinite(amt) || amt <= 0) return 'Amount must be greater than 0';
+  if (fromId == null || toId == null) return 'Unknown member';
+  if (Number(fromId) === Number(toId)) return 'Cannot record a payment to yourself';
+  const from = await qGet('SELECT id FROM members WHERE id = ? AND group_id = ?', [fromId, group.id]);
+  const to = await qGet('SELECT id FROM members WHERE id = ? AND group_id = ?', [toId, group.id]);
+  if (!from || !to) return 'Unknown member';
+  return null;
+}
+
+app.post('/api/groups/:code/settlements', async (req, res) => {
+  const group = await getGroup(req.params.code);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  const { from_member_id, to_member_id, amount } = req.body || {};
+  const err = await validateTransfer(group, from_member_id, to_member_id, amount);
+  if (err) return res.status(400).json({ error: err });
+  const info = await qRun(
+    'INSERT INTO settlements (group_code, from_member_id, to_member_id, amount) VALUES (?, ?, ?, ?)',
+    [group.code, Number(from_member_id), Number(to_member_id), Number(amount)]);
+  const row = await qGet('SELECT * FROM settlements WHERE id = ?', [Number(info.lastInsertRowid)]);
+  res.status(201).json(transferJson(row));
+});
+
+app.delete('/api/groups/:code/settlements/:id', async (req, res) => {
+  const group = await getGroup(req.params.code);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  const info = await qRun('DELETE FROM settlements WHERE id = ? AND group_code = ?', [req.params.id, group.code]);
+  if (info.rowsAffected === 0) return res.status(404).json({ error: 'Settlement not found' });
+  res.json({ ok: true, id: Number(req.params.id) });
+});
+
+app.post('/api/groups/:code/nudges', async (req, res) => {
+  const group = await getGroup(req.params.code);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  const { from_member_id, to_member_id, amount } = req.body || {};
+  const err = await validateTransfer(group, from_member_id, to_member_id, amount);
+  if (err) return res.status(400).json({ error: err });
+  const info = await qRun(
+    'INSERT INTO nudges (group_code, from_member_id, to_member_id, amount) VALUES (?, ?, ?, ?)',
+    [group.code, Number(from_member_id), Number(to_member_id), Number(amount)]);
+  const row = await qGet('SELECT * FROM nudges WHERE id = ?', [Number(info.lastInsertRowid)]);
+  res.status(201).json(transferJson(row));
+});
+
+// Payment handles: only fields present in the body are updated; an empty
+// string clears a handle.
+function handleValue(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s === '' ? null : s.slice(0, 80);
+}
+app.patch('/api/groups/:code/members/:id', async (req, res) => {
+  const group = await getGroup(req.params.code);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  const member = await qGet('SELECT id, nickname, venmo_handle, cashapp_handle, created_at FROM members WHERE id = ? AND group_id = ?', [req.params.id, group.id]);
+  if (!member) return res.status(404).json({ error: 'Member not found' });
+  const body = req.body || {};
+  const sets = [];
+  const args = [];
+  if ('venmo_handle' in body) { sets.push('venmo_handle = ?'); args.push(handleValue(body.venmo_handle)); }
+  if ('cashapp_handle' in body) { sets.push('cashapp_handle = ?'); args.push(handleValue(body.cashapp_handle)); }
+  if (sets.length) {
+    await qRun(`UPDATE members SET ${sets.join(', ')} WHERE id = ?`, [...args, member.id]);
+  }
+  const updated = await qGet('SELECT id, nickname, venmo_handle, cashapp_handle, created_at FROM members WHERE id = ?', [member.id]);
+  res.json(memberJson(updated));
 });
 
 app.delete('/api/groups/:code/expenses/:id', async (req, res) => {
@@ -359,6 +512,7 @@ if (fs.existsSync(WEB_DIR)) {
 
 async function main() {
   await db.executeMultiple(SCHEMA);
+  await runMigrations();
   app.listen(PORT, () => {
     console.log(`Split server listening on http://localhost:${PORT}`);
     console.log(`DB mode: ${TURSO_URL ? 'Turso (hosted)' : 'local file ' + DB_PATH}`);
