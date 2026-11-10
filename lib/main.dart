@@ -1,6 +1,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -8,47 +9,88 @@ import 'api.dart';
 
 void main() => runApp(const SplitApp());
 
-const _brand = Color(0xFF0E7C66); // deep teal-green
-const _accent = Color(0xFFF59E0B); // warm amber
-const _ink = Color(0xFF12211D);
+// RolodexAI look: vibrant dark mode, cosmic purple brand, neon highlights.
+const _brand = Color(0xFF9B87F5); // vibrant purple
+const _accent = Color(0xFFFF4D94); // neon pink highlight
+const _neonBlue = Color(0xFF4DA6FF); // neon blue highlight
+const _bg = Color(0xFF0A0A10); // deep space black
 
 class SplitApp extends StatelessWidget {
   const SplitApp({super.key});
 
   @override
   Widget build(BuildContext context) {
+    final base = ThemeData(brightness: Brightness.dark);
     return MaterialApp(
       title: 'Split',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: _brand, brightness: Brightness.light),
+        brightness: Brightness.dark,
+        colorScheme: ColorScheme.fromSeed(seedColor: _brand, brightness: Brightness.dark),
         useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFFF6F8F7),
+        // Scaffolds are transparent so the aurora gradient shows through.
+        scaffoldBackgroundColor: Colors.transparent,
+        textTheme: GoogleFonts.interTextTheme(base.textTheme),
         appBarTheme: const AppBarTheme(
-          backgroundColor: _brand,
+          backgroundColor: Colors.transparent,
           foregroundColor: Colors.white,
           centerTitle: false,
           elevation: 0,
         ),
         cardTheme: CardThemeData(
           elevation: 0,
-          color: Colors.white,
+          color: Colors.white.withValues(alpha: 0.05),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
-            side: BorderSide(color: Colors.grey.shade200),
+            side: BorderSide(color: Colors.white.withValues(alpha: 0.10)),
           ),
         ),
+        dialogTheme: const DialogThemeData(
+          backgroundColor: Color(0xFF17171F),
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.all(Radius.circular(16))),
+        ),
         inputDecorationTheme: InputDecorationTheme(
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.10)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.10)),
+          ),
           filled: true,
-          fillColor: Colors.white,
+          fillColor: Colors.white.withValues(alpha: 0.05),
         ),
         filledButtonTheme: FilledButtonThemeData(
           style: FilledButton.styleFrom(
+            backgroundColor: _brand,
+            foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           ),
         ),
+        chipTheme: base.chipTheme.copyWith(
+          backgroundColor: Colors.white.withValues(alpha: 0.06),
+          labelStyle: const TextStyle(color: Colors.white),
+        ),
+      ),
+      // Aurora backdrop: deep space black with purple / pink / blue glows.
+      builder: (context, child) => Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color(0xFF1B1533),
+              _bg,
+              _bg,
+              Color(0xFF141021),
+            ],
+            stops: [0.0, 0.35, 0.7, 1.0],
+          ),
+        ),
+        child: child,
       ),
       home: const RootScreen(),
     );
@@ -210,23 +252,27 @@ class _LandingScreenState extends State<LandingScreen> with SingleTickerProvider
                     width: 84,
                     height: 84,
                     decoration: BoxDecoration(
-                      color: _brand,
+                      gradient: const LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [_brand, _neonBlue],
+                      ),
                       borderRadius: BorderRadius.circular(24),
                     ),
                     child: const Icon(Icons.call_split_rounded, size: 44, color: Colors.white),
                   ),
                 ),
                 const SizedBox(height: 16),
-                const Center(
+                Center(
                   child: Text('Split',
-                      style: TextStyle(fontSize: 40, fontWeight: FontWeight.w800, color: _ink)),
+                      style: GoogleFonts.outfit(fontSize: 40, fontWeight: FontWeight.w800, color: Colors.white)),
                 ),
                 const SizedBox(height: 6),
                 const Center(
                   child: Text(
                     'Snap receipts. Split them equally.\nSettle up in seconds.',
                     textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 16, color: Colors.black54, height: 1.4),
+                    style: TextStyle(fontSize: 16, color: Colors.white60, height: 1.4),
                   ),
                 ),
                 const SizedBox(height: 28),
@@ -238,7 +284,7 @@ class _LandingScreenState extends State<LandingScreen> with SingleTickerProvider
                         TabBar(
                           controller: _tabs,
                           labelColor: _brand,
-                          unselectedLabelColor: Colors.black54,
+                          unselectedLabelColor: Colors.white54,
                           indicatorColor: _brand,
                           tabs: const [
                             Tab(text: 'Create a group'),
@@ -265,7 +311,7 @@ class _LandingScreenState extends State<LandingScreen> with SingleTickerProvider
                   child: Text(
                     'No accounts. No passwords.\nJust share the group link and pick a nickname.',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.black45, fontSize: 13, height: 1.5),
+                    style: TextStyle(color: Colors.white54, fontSize: 13, height: 1.5),
                   ),
                 ),
               ],
@@ -553,7 +599,7 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
                       style: TextStyle(color: Colors.white70, fontSize: 12, letterSpacing: 1.2)),
                   const SizedBox(height: 4),
                   Text('\$$total',
-                      style: const TextStyle(
+                      style: GoogleFonts.outfit(
                           color: Colors.white, fontSize: 40, fontWeight: FontWeight.w800)),
                   const SizedBox(height: 4),
                   Text(
@@ -569,7 +615,7 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
           const SizedBox(height: 16),
           if (members.isNotEmpty) ...[
             const Text('MEMBERS',
-                style: TextStyle(fontSize: 12, letterSpacing: 1.2, color: Colors.black45)),
+                style: TextStyle(fontSize: 12, letterSpacing: 1.2, color: Colors.white54)),
             const SizedBox(height: 8),
             Wrap(
               spacing: 8,
@@ -592,7 +638,7 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
             const SizedBox(height: 16),
           ],
           const Text('EXPENSES',
-              style: TextStyle(fontSize: 12, letterSpacing: 1.2, color: Colors.black45)),
+              style: TextStyle(fontSize: 12, letterSpacing: 1.2, color: Colors.white54)),
           const SizedBox(height: 8),
           if (expenses.isEmpty)
             const Card(
@@ -602,7 +648,7 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
                   child: Text(
                     'No expenses yet.\nSnap your first receipt to get splitting.',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.black54, height: 1.5),
+                    style: TextStyle(color: Colors.white60, height: 1.5),
                   ),
                 ),
               ),
@@ -704,7 +750,7 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text('WHO PAID WHAT',
-                    style: TextStyle(fontSize: 12, letterSpacing: 1.2, color: Colors.black45)),
+                    style: TextStyle(fontSize: 12, letterSpacing: 1.2, color: Colors.white54)),
                 const SizedBox(height: 8),
                 if (balances.isEmpty)
                   const Text('Nobody here yet.')
@@ -718,10 +764,10 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
                             ? 'owes \$${net.abs().toStringAsFixed(2)}'
                             : 'all settled';
                     final color = net > 0.005
-                        ? Colors.green.shade700
+                        ? Colors.green.shade400
                         : net < -0.005
-                            ? Colors.red.shade700
-                            : Colors.black54;
+                            ? Colors.red.shade400
+                            : Colors.white54;
                     return Padding(
                       padding: const EdgeInsets.symmetric(vertical: 6),
                       child: Row(
@@ -743,7 +789,7 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
                                 Text('${b['nickname']}${isMe ? ' (you)' : ''}',
                                     style: const TextStyle(fontWeight: FontWeight.w600)),
                                 Text('Paid \$${b['paid']} • Share \$${b['share']}',
-                                    style: const TextStyle(color: Colors.black54, fontSize: 13)),
+                                    style: const TextStyle(color: Colors.white60, fontSize: 13)),
                               ],
                             ),
                           ),
@@ -758,7 +804,9 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
         ),
         const SizedBox(height: 16),
         Card(
-          color: allSettled ? Colors.green.shade50 : Colors.amber.shade50,
+          color: allSettled
+              ? Colors.green.withValues(alpha: 0.12)
+              : Colors.amber.withValues(alpha: 0.12),
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
@@ -767,7 +815,7 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
                 Row(
                   children: [
                     Icon(allSettled ? Icons.check_circle_rounded : Icons.handshake_rounded,
-                        color: allSettled ? Colors.green.shade700 : Colors.amber.shade800),
+                        color: allSettled ? Colors.green.shade300 : Colors.amber.shade300),
                     const SizedBox(width: 8),
                     Text(allSettled ? 'Everyone is settled up' : 'SETTLE UP',
                         style: const TextStyle(fontWeight: FontWeight.w800, letterSpacing: 0.5)),
@@ -793,7 +841,7 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
                     padding: EdgeInsets.only(top: 8),
                     child: Text(
                       'Fewest payments possible — just these transfers and everyone is even.',
-                      style: TextStyle(color: Colors.black54, fontSize: 13),
+                      style: TextStyle(color: Colors.white60, fontSize: 13),
                     ),
                   ),
               ],
@@ -808,14 +856,14 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
 
 Color _avatarColor(String name) {
   const palette = [
-    Color(0xFF0E7C66),
-    Color(0xFF7C3AED),
-    Color(0xFFDB2777),
-    Color(0xFFD97706),
-    Color(0xFF2563EB),
-    Color(0xFF0891B2),
-    Color(0xFF65A30D),
-    Color(0xFFDC2626),
+    Color(0xFF9B87F5),
+    Color(0xFFFF4D94),
+    Color(0xFF4DA6FF),
+    Color(0xFF7E69AB),
+    Color(0xFF8B5CF6),
+    Color(0xFFD946EF),
+    Color(0xFF0EA5E9),
+    Color(0xFFC084FC),
   ];
   var h = 0;
   for (final c in name.codeUnits) {
@@ -1006,13 +1054,13 @@ class _AddExpenseDialogState extends State<AddExpenseDialog> {
                         margin: const EdgeInsets.only(bottom: 12),
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: Colors.amber.shade50,
+                          color: Colors.amber.withValues(alpha: 0.12),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Row(
                           children: [
                             Icon(Icons.auto_awesome_rounded,
-                                color: Colors.amber.shade800, size: 20),
+                                color: Colors.amber.shade300, size: 20),
                             const SizedBox(width: 8),
                             Expanded(child: Text(_ocrNote!, style: const TextStyle(fontSize: 13))),
                           ],
@@ -1067,7 +1115,7 @@ class _AddExpenseDialogState extends State<AddExpenseDialog> {
                       const SizedBox(height: 8),
                       Text(
                         'Paid by ${widget.session.nickname} • Split equally between everyone in the group.',
-                        style: const TextStyle(color: Colors.black54, fontSize: 13),
+                        style: const TextStyle(color: Colors.white60, fontSize: 13),
                       ),
                     ],
                   ],
