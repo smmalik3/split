@@ -164,6 +164,27 @@ class Session {
   const Session(this.code, this.memberId, this.nickname);
 }
 
+/// Upserts a group into the saved My Groups list (SharedPreferences).
+/// Shared by the landing screen and the group screen so going home always
+/// leaves the current group in the list.
+Future<void> persistMyGroup(String code, String name, String nickname, int memberId) async {
+  final prefs = await SharedPreferences.getInstance();
+  final raw = prefs.getString('split_my_groups');
+  var list = <Map<String, dynamic>>[];
+  if (raw != null && raw.isNotEmpty) {
+    try {
+      list = (jsonDecode(raw) as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    } catch (_) {}
+  }
+  list = [
+    {'code': code, 'name': name, 'nickname': nickname, 'memberId': memberId},
+    ...list.where((g) => g['code'] != code),
+  ];
+  await prefs.setString('split_my_groups', jsonEncode(list));
+}
+
 class RootScreen extends StatefulWidget {
   const RootScreen({super.key});
   @override
@@ -174,6 +195,7 @@ class _RootScreenState extends State<RootScreen> {
   Session? _session;
   String? _joinCodePrefill;
   bool _loading = true;
+  bool _showHome = false;
 
   @override
   void initState() {
@@ -201,7 +223,10 @@ class _RootScreenState extends State<RootScreen> {
     await prefs.setString('split_code', s.code);
     await prefs.setInt('split_member_id', s.memberId);
     await prefs.setString('split_nickname', s.nickname);
-    setState(() => _session = s);
+    setState(() {
+      _session = s;
+      _showHome = false;
+    });
   }
 
   Future<void> _leave() async {
@@ -209,7 +234,16 @@ class _RootScreenState extends State<RootScreen> {
     await prefs.remove('split_code');
     await prefs.remove('split_member_id');
     await prefs.remove('split_nickname');
-    setState(() => _session = null);
+    setState(() {
+      _session = null;
+      _showHome = false;
+    });
+  }
+
+  void _goHome() {
+    // Back to the landing screen without leaving the group: the session
+    // stays stored, so reopening the app still restores it.
+    setState(() => _showHome = true);
   }
 
   @override
@@ -217,8 +251,8 @@ class _RootScreenState extends State<RootScreen> {
     if (_loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
-    if (_session != null) {
-      return GroupScreen(session: _session!, onLeave: _leave);
+    if (_session != null && !_showHome) {
+      return GroupScreen(session: _session!, onLeave: _leave, onHome: _goHome);
     }
     return LandingScreen(prefillCode: _joinCodePrefill, onSession: _saveSession);
   }
@@ -745,7 +779,8 @@ String _csvCell(String v) {
 class GroupScreen extends StatefulWidget {
   final Session session;
   final Future<void> Function() onLeave;
-  const GroupScreen({super.key, required this.session, required this.onLeave});
+  final VoidCallback onHome;
+  const GroupScreen({super.key, required this.session, required this.onLeave, required this.onHome});
 
   @override
   State<GroupScreen> createState() => _GroupScreenState();
@@ -838,6 +873,17 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
     }
   }
 
+  Future<void> _goHome() async {
+    // Make sure this group is in My Groups, then go to the landing screen.
+    await persistMyGroup(
+      widget.session.code,
+      _group?['name'] as String? ?? 'Split',
+      widget.session.nickname,
+      widget.session.memberId,
+    );
+    widget.onHome();
+  }
+
   @override
   Widget build(BuildContext context) {
     final members = (_group?['members'] as List?) ?? [];
@@ -850,6 +896,11 @@ class _GroupScreenState extends State<GroupScreen> with SingleTickerProviderStat
 
     return Scaffold(
       appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_rounded),
+          tooltip: 'My groups',
+          onPressed: _goHome,
+        ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
