@@ -12,9 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl unzip xz-utils zip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Same install path proven on the dev VM: shallow clone of stable.
-# (Locally this produced Flutter 3.47.9 / Dart 3.13.7; pubspec requires sdk ^3.13.7.)
-RUN git clone --depth 1 -b stable https://github.com/flutter/flutter.git /opt/flutter
+# Pin the exact Flutter verified locally (3.47.9 / Dart 3.13.7). Floating
+# `stable` broke the first Render build — the builder's fresh clone can
+# roll forward to an untested Flutter/Dart at any time.
+RUN git clone --depth 1 --branch 3.47.9 https://github.com/flutter/flutter.git /opt/flutter
 ENV PATH="/opt/flutter/bin:${PATH}"
 ENV CI=true
 
