@@ -1,0 +1,24 @@
+# Keep the Docker build context small and secret-free.
+# NOTE: data/tesseract-cache is deliberately NOT ignored — the OCR language
+# data is baked into the image (see Dockerfile). The live DB and uploads
+# are excluded so every deploy starts with an empty database.
+.git
+.github
+.idea
+.dart_tool
+build
+node_modules
+server/node_modules
+android
+ios
+test
+*.log
+data/db
+data/uploads
+data/test
+data/*.log
+server/ocr-test.js
+start.sh
+stop.sh
+tunnel.sh
+.DS_Store

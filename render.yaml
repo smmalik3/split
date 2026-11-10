@@ -1,0 +1,22 @@
+# Split — Render Blueprint (Docker runtime, free plan).
+# Deploy from the Render dashboard: New > Blueprint > connect the GitHub repo.
+# Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in the Render dashboard
+# (they are marked sync: false below, so Render will prompt for them).
+# The free web service spins down after 15 minutes without traffic and
+# cold-starts on the next request; the database lives in Turso, so data
+# survives spin-downs and deploys.
+services:
+  - type: web
+    name: split
+    runtime: docker
+    region: virginia
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
