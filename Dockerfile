@@ -28,8 +28,8 @@ RUN flutter --version \
     && flutter build web --release
 
 # ---- Stage 2: slim Node 24 runtime ----
-# node:sqlite is a Node builtin (no build tools needed); express/multer/
-# tesseract.js are pure JS, so npm ci needs no compiler here.
+# express/multer/tesseract.js are pure JS and @libsql/client ships its native
+# binding as an optional dependency, so npm ci needs no compiler here.
 FROM node:24-slim AS runtime
 
 WORKDIR /app
