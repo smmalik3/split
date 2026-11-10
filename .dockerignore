@@ -6,7 +6,6 @@
 .github
 .idea
 .dart_tool
-build
 node_modules
 server/node_modules
 android
